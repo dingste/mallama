@@ -204,6 +204,9 @@ task_params server_task::params_from_json_cmpl(
     params.sampling.mirostat           = json_value(data, "mirostat",            defaults.sampling.mirostat);
     params.sampling.mirostat_tau       = json_value(data, "mirostat_tau",        defaults.sampling.mirostat_tau);
     params.sampling.mirostat_eta       = json_value(data, "mirostat_eta",        defaults.sampling.mirostat_eta);
+    params.sampling.early_exit         = json_value(data, "early_exit",          defaults.sampling.early_exit);
+    params.sampling.early_exit_gap     = json_value(data, "early_exit_gap",      defaults.sampling.early_exit_gap);
+    params.sampling.early_exit_burnout = json_value(data, "early_exit_burnout",  defaults.sampling.early_exit_burnout);
     params.sampling.adaptive_target    = json_value(data, "adaptive_target",     defaults.sampling.adaptive_target);
     params.sampling.adaptive_decay     = json_value(data, "adaptive_decay",      defaults.sampling.adaptive_decay);
     params.sampling.seed               = json_value(data, "seed",                defaults.sampling.seed);
