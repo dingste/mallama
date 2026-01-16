@@ -1811,6 +1811,27 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_sparam());
     add_opt(common_arg(
+        {"--early-exit"},
+        "stop generation based on information dynamics (S-threshold)",
+        [](common_params & params) {
+            params.sampling.early_exit = true;
+        }
+    ).set_sparam());
+    add_opt(common_arg(
+        {"--early-exit-gap"}, "N",
+        string_format("stability threshold (S) (default: %.1f)", (double)params.sampling.early_exit_gap),
+        [](common_params & params, const std::string & value) {
+            params.sampling.early_exit_gap = std::stof(value);
+        }
+    ).set_sparam());
+    add_opt(common_arg(
+        {"--early-exit-burnout"}, "N",
+        string_format("energy dissipation limit (E) (default: %.1f)", (double)params.sampling.early_exit_burnout),
+        [](common_params & params, const std::string & value) {
+            params.sampling.early_exit_burnout = std::stof(value);
+        }
+    ).set_sparam());
+    add_opt(common_arg(
         {"--grammar"}, "GRAMMAR",
         string_format("BNF-like grammar to constrain generations (see samples in grammars/ dir) (default: '%s')", params.sampling.grammar.c_str()),
         [](common_params & params, const std::string & value) {

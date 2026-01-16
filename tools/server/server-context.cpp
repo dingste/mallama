@@ -45,6 +45,21 @@ enum server_state {
     SERVER_STATE_READY,          // Server is ready and model is loaded
 };
 
+static float get_entropy_stability(const float * logits, int n_vocab) {
+    float max1 = -INFINITY;
+    float max2 = -INFINITY;
+    for (int i = 0; i < n_vocab; ++i) {
+        const float v = logits[i];
+        if (v > max1) {
+            max2 = max1;
+            max1 = v;
+        } else if (v > max2) {
+            max2 = v;
+        }
+    }
+    return max1 - max2;
+}
+
 struct server_slot {
     int id;
 
@@ -88,6 +103,13 @@ struct server_slot {
     std::vector<int32_t> i_batch_dft;
 
     std::vector<completion_token_output> generated_token_probs;
+
+    // Information Dynamics Tracking
+    float s_prev_stability = 0.0f;
+    float c_context_drift = 0.0f;
+    float s_predictive_confidence = 0.0f; 
+    float alpha = 0.3f;
+    bool  sampling_state_synced = false;
 
     bool has_next_token = true;
     bool has_new_line   = false;
@@ -191,6 +213,11 @@ struct server_slot {
         task.reset();
 
         llama_set_sampler(ctx, id, nullptr);
+
+        // Reset dynamics
+        s_prev_stability = 0.0f;
+        c_context_drift = 0.0f;
+        sampling_state_synced = false;
 
         // clear alora start
         alora_invocation_start = -1;
@@ -848,7 +875,8 @@ private:
         // thinking is enabled if:
         // 1. It's not explicitly disabled (reasoning_budget == 0)
         // 2. The chat template supports it
-        const bool enable_thinking = params_base.use_jinja && params_base.reasoning_budget != 0 && common_chat_templates_support_enable_thinking(chat_templates.get());
+        // 3. Early exit is NOT enabled (user request: "turn it off with the argument '--early-exit'")
+        const bool enable_thinking = params_base.use_jinja && params_base.reasoning_budget != 0 && common_chat_templates_support_enable_thinking(chat_templates.get()) && !params_base.sampling.early_exit;
         SRV_INF("thinking = %d\n", enable_thinking);
 
         oai_parser_opt = {
@@ -2554,6 +2582,11 @@ private:
                         slot.n_decoded = 0;
                         slot.i_batch   = batch.n_tokens - 1;
 
+                        // Reset Information Dynamics
+                        slot.s_prev_stability = 0.0f;
+                        slot.c_context_drift = 0.0f;
+                        slot.sampling_state_synced = false;
+
                         SLT_INF(slot, "prompt done, n_tokens = %d, batch.n_tokens = %d\n", slot.prompt.n_tokens(), batch.n_tokens);
 
                         slot.init_sampler();
@@ -2763,6 +2796,50 @@ private:
                 }
 
                 const int tok_idx = slot.i_batch - i;
+
+                // Token Information Dynamics Control
+                if (slot.task->params.sampling.early_exit) {
+                    const float * logits = llama_get_logits_ith(ctx, tok_idx);
+                    const int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(llama_get_model(ctx)));
+                    const float S = get_entropy_stability(logits, n_vocab);
+                    bool reach_exit = false;
+
+                    if (!slot.sampling_state_synced) {
+                        slot.s_predictive_confidence = S;
+                        slot.s_prev_stability = S;
+                        slot.sampling_state_synced = true;
+                    }
+
+                    slot.s_predictive_confidence = (slot.alpha * S) + (1.0f - slot.alpha) * slot.s_predictive_confidence;
+                    float S_prime = slot.s_predictive_confidence - slot.s_prev_stability; 
+                    slot.s_prev_stability = slot.s_predictive_confidence;
+                    slot.c_context_drift += std::abs(S_prime);
+
+                    SLT_INF(slot, "inf_stat: conf=%.2f, drift=%.2f, budget=%.1f\n",S, slot.s_predictive_confidence, slot.c_context_drift);
+
+                    if (slot.c_context_drift > slot.task->params.sampling.early_exit_burnout) {
+                        SLT_INF(slot, "C-Gap-limit reached (%.1f). Exit.\n", slot.c_context_drift);
+                        reach_exit = true;
+                    }
+
+                    if (S > slot.task->params.sampling.early_exit_gap) {
+                        SLT_INF(slot, "S-budget reached (%.2f). Exit.\n", S);
+                        reach_exit = true;
+                    }
+
+                    if(reach_exit){
+                        completion_token_output tkn_exit;
+                        tkn_exit.text_to_send = ".."; 
+                        send_partial_response(slot, tkn_exit, false);
+
+                        slot.generated_text += tkn_exit.text_to_send;
+                        slot.print_timings();
+                        send_final_response(slot);
+                        metrics.on_prediction(slot);
+                        slot.release();
+                        continue;
+                    }
+                }
 
                 llama_token id = common_sampler_sample(slot.smpl.get(), ctx, tok_idx);
 

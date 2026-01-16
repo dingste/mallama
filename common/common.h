@@ -193,9 +193,12 @@ struct common_params_sampling {
     float   top_n_sigma        = -1.00f; // -1.0 = disabled
     float   mirostat_tau       = 5.00f;  // target entropy
     float   mirostat_eta       = 0.10f;  // learning rate
+    float   early_exit_gap     = 6.0f;    // Stability threshold (S)
+    float   early_exit_burnout = 1000.0f; // Energy dissipation limit (E)
     bool    ignore_eos         = false;
     bool    no_perf            = false;  // disable performance metrics
     bool    timing_per_token   = false;
+    bool    early_exit         = false; // disable early exit
 
     uint64_t user_sampling_config = 0; // bitfield to track user-specified samplers
 
