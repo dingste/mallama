@@ -1,0 +1,24 @@
+From 80c13250b50ddfaf1902d9947c34dedc8bebaac5 Mon Sep 17 00:00:00 2001
+From: DieDieDie <dieter@dingste.de>
+Date: Thu, 8 Jan 2026 21:29:34 +0100
+Subject: [PATCH 3/3] =?UTF-8?q?=09gel=C3=B6scht:=20=20=20=20=20=20=20.gemi?=
+ =?UTF-8?q?ni/settings.json?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .gemini/settings.json | 1 -
+ 1 file changed, 1 deletion(-)
+ delete mode 100644 .gemini/settings.json
+
+diff --git a/.gemini/settings.json b/.gemini/settings.json
+deleted file mode 100644
+index 68337d390..000000000
+--- a/.gemini/settings.json
++++ /dev/null
+@@ -1 +0,0 @@
+-{ "contextFileName": "AGENTS.md" }
+-- 
+2.52.0
+
