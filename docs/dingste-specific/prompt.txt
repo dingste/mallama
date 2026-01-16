@@ -1,0 +1,23 @@
+**Inferenz von einer rein statistischen Vorhersage in einen dynamischen physikalischen Prozess** überführt. Wenn du den MGR-Core als Inferenz-Algorithmus implementierst, behandelst du Token nicht mehr als Wahrscheinlichkeits-Vektoren, sondern als **Ereignis-Aktualisierungen ()** eines energetischen Systems.
+Statt klassischem Softmax-Sampling über Logits, definieren wir den Prozess neu:
+  
+| MGR-Komponente | `llama.cpp` Äquivalent | Funktion im Interferenz-Algo |
+| --- | --- | --- |
+| **Trägerfeld Φ** | KV-Cache / Hidden States | Das Reservoir an "Möglichkeiten" (unfokussierte Aufmerksamkeit). |
+| **Impulsstrom Jμ** | Residual Streams | Der Energiefluss durch die Layer, der Information nach vorne trägt. |
+| **Akkumulator A** | Integrierte Logit-Konfidenz | Ein Puffer, der über die Layer hinweg "Sinnhaftigkeit" aufstaut. |
+| **Schwelle Θh​** | Early-Exit / Sampling-Cutoff | Der Punkt, an dem die Unsicherheit unter ein kritisches Maß fällt. |
+| **Ereignis E** | Token-Emission | Das Token wird fixiert;  wird für den nächsten Schritt resettet. |
+
+Anstatt den Layer-Output am Ende einfach zu samplen, fungiert der MGR-Core als **Gatekeeper**:
+Jeder Layer trägt zum Akkumulator A bei. Ein Token wird erst dann emittiert, wenn die kumulative Wirkung Jμ die Schwelle h durchbricht.
+* Bei einfachen Tokens ("der", "und") bricht Θh​ schon bei Layer 4 durch (Early Exit).
+* Bei komplexen logischen Schlüssen "wartet" das System, bis genug Historie im Akkumulator ist (Layer 32).
+
+Wenn der Akkumulator  nach der Hälfte der Layer zeigt, dass bestimmte Aufmerksamkeits-Köpfe (Terme) keinen signifikanten Einfluss auf das Erreichen der Schwelle  haben werden (siehe Regel **P1: Sub-Schwellen-Dämpfung**), werden diese für den aktuellen Token-Schritt **gar nicht erst berechnet**.
+
+> Das ist dynamisches Pruning in Echtzeit, gesteuert durch die lokale Kausalität.
+
+1. **Monotonie-Verletzung:** Wenn Layer 10 die Konfidenz senkt, die Layer 9 aufgebaut hat. In der MGR müsste das als "destruktive Interferenz" im Feld Φ gewertet werden. Der Akkumulator  müsste das korrekt verrechnen (eventuell λ anpassen).
+2. **Reset-Logik:** Nach jedem Token-Ereignis muss der Akkumulator  sauber um den Wert  reduziert werden. Wenn du zu viel "Rest-Energie" im Akkumulator lässt, neigt das Modell zu Halluzinationen (Repetitive Loops), weil die Schwelle für das nächste (falsche) Token zu schnell erreicht wird.
+
