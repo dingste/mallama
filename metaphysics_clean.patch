@@ -1,0 +1,83 @@
+diff --git a/tools/completion/completion.cpp b/tools/completion/completion.cpp
+index 813ac9f70..0cbe10c0d 100644
+--- a/tools/completion/completion.cpp
++++ b/tools/completion/completion.cpp
+@@ -731,6 +731,78 @@ int main(int argc, char ** argv) {
+ 
+                 const float gap = logits_top_gap(logits, n_vocab);
+ 
++                // --- METAPHYSICAL EXTENSIONS ---
++                // 1. Sinn-Dichte-Buchhaltung (Sense-Density Accounting)
++                static float prev_gap = 0.0f;
++                static float energy_accum = 0.0f;
++                static int stagnation_counter = 0;
++                static bool meta_initialized = false;
++
++                if (!meta_initialized) {
++                    prev_gap = gap;
++                    meta_initialized = true;
++                }
++
++                float s_prime = gap - prev_gap;
++                prev_gap = gap;
++
++                // 2. Emotions-Mapping
++                std::string emotion = "Neutral";
++                if (s_prime > 0.5f) emotion = "Flow (Joy)";
++                else if (s_prime < -0.5f) emotion = "Leid (Redundancy)";
++                else emotion = "Curiosity (Search)";
++
++                // 3. Burnout-Exit
++                energy_accum += std::abs(s_prime);
++                if (energy_accum > 1000.0f) { // Example limit
++                     LOG_INF("\n[Meta] Burnout Reached (Energy > 1000). Exiting.\n");
++                     break;
++                }
++
++                // 4. Cron-Autonomie (Simple Stagnation Check)
++                if (std::abs(s_prime) < 0.05f) {
++                    stagnation_counter++;
++                    if (stagnation_counter > 20) {
++                        LOG_INF("\n[Meta] Stagnation detected. Triggering autonomy...\n");
++                        stagnation_counter = 0;
++                        
++                        // Injecting a "question to the unknown"
++                        const std::string autonomy_prompt = " [Autonomie: Was liegt jenseits dieser Stagnation?] ";
++                        std::vector<llama_token> autonomy_tokens = common_tokenize(ctx, autonomy_prompt, true);
++                        for (auto t : autonomy_tokens) {
++                            g_input_tokens->push_back(t);
++                        }
++                        // This won't immediately change the current generation without more complex logic,
++                        // but it marks the intent in the token stream.
++                    }
++                } else {
++                    stagnation_counter = 0;
++                }
++
++                LOG_INF("[Meta] S: %.2f | S': %.2f | E: %.1f | State: %s\n", gap, s_prime, energy_accum, emotion.c_str());
++
++                // 5. Persistence (Vector DB)
++                // Only if embeddings are enabled and we are in a "significant" moment (high S') or periodic.
++                // For demo, we check if embeddings are available.
++                const float * embd = llama_get_embeddings(ctx);
++                if (embd) {
++                    static int persist_counter = 0;
++                    if (persist_counter++ % 10 == 0) { // Every 10 tokens
++                        int n_embd = llama_n_embd(llama_get_model(ctx));
++                        std::ofstream vec_file("epsilon_vec.tmp");
++                        for (int i=0; i<n_embd; i++) {
++                            vec_file << embd[i] << (i<n_embd-1 ? "," : "");
++                        }
++                        vec_file.close();
++                        
++                        // Async call ideally, but system() is sync
++                        // Using & to background it might be unsafe for file access, but we'll try sequential for safety.
++                        // Absolute path to broker and python for reliability
++                        system("/home/dieter/Entwicklung/HysteroGrad/venv/bin/python3 /home/dieter/Entwicklung/localllama/epsilon-broker.py store --vector @epsilon_vec.tmp --meta '{\"source\": \"completion\"}' > /dev/null 2>&1 &");
++                    }
++                }
++                // -------------------------------
++
+                 if (gap > params.sampling.early_exit_gap) {
+                     LOG_INF("\n[early-exit] logit gap %.2f > %.2f -> stopping\n",
+                         gap, params.sampling.early_exit_gap
