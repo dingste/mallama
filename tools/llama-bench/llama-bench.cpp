@@ -356,6 +356,7 @@ struct cmd_params {
     std::vector<bool>                early_exit;
     std::vector<float>               early_exit_gap;
     std::vector<float>               early_exit_burnout;
+    std::vector<std::string>         lora;
     ggml_numa_strategy               numa;
     int                              reps;
     ggml_sched_priority              prio;
@@ -398,6 +399,7 @@ static const cmd_params cmd_params_defaults = {
     /* early_exit           */ { false },
     /* early_exit_gap       */ { 6.0f },
     /* early_exit_burnout   */ { 1000.0f },
+    /* lora                 */ { "" },
     /* numa                 */ GGML_NUMA_STRATEGY_DISABLED,
     /* reps                 */ 5,
     /* prio                 */ GGML_SCHED_PRIO_NORMAL,
@@ -852,6 +854,13 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                 }
                 auto p = string_split<float>(argv[i], split_delim);
                 params.early_exit_burnout.insert(params.early_exit_burnout.end(), p.begin(), p.end());
+            } else if (arg == "--lora") {
+                if (++i >= argc) {
+                    invalid_param = true;
+                    break;
+                }
+                auto p = string_split<std::string>(argv[i], split_delim);
+                params.lora.insert(params.lora.end(), p.begin(), p.end());
             } else if (arg == "-ts" || arg == "--tensor-split") {
                 if (++i >= argc) {
                     invalid_param = true;
@@ -1088,6 +1097,9 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
     if (params.early_exit_burnout.empty()) {
         params.early_exit_burnout = cmd_params_defaults.early_exit_burnout;
     }
+    if (params.lora.empty()) {
+        params.lora = cmd_params_defaults.lora;
+    }
     if (params.n_threads.empty()) {
         params.n_threads = cmd_params_defaults.n_threads;
     }
@@ -1134,6 +1146,7 @@ struct cmd_params_instance {
     bool               early_exit;
     float              early_exit_gap;
     float              early_exit_burnout;
+    std::vector<common_adapter_lora_info> lora_adapters;
 
     llama_model_params to_llama_mparams() const {
         llama_model_params mparams = llama_model_default_params();
@@ -1189,6 +1202,15 @@ struct cmd_params_instance {
     }
 
     bool equal_mparams(const cmd_params_instance & other) const {
+        if (lora_adapters.size() != other.lora_adapters.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < lora_adapters.size(); i++) {
+            if (lora_adapters[i].path != other.lora_adapters[i].path ||
+                lora_adapters[i].scale != other.lora_adapters[i].scale) {
+                return false;
+            }
+        }
         return model == other.model && n_gpu_layers == other.n_gpu_layers && n_cpu_moe == other.n_cpu_moe &&
                split_mode == other.split_mode &&
                main_gpu == other.main_gpu && tensor_split == other.tensor_split &&
@@ -1247,7 +1269,21 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
     for (const auto & pl : params.poll)
     for (const auto & ee : params.early_exit)
     for (const auto & eeg : params.early_exit_gap)
-    for (const auto & eeb : params.early_exit_burnout) {
+    for (const auto & eeb : params.early_exit_burnout)
+    for (const auto & lo : params.lora) {
+        std::vector<common_adapter_lora_info> lora_adapters;
+        if (!lo.empty()) {
+            auto lora_specs = string_split<std::string>(lo, '+');
+            for (const auto & spec : lora_specs) {
+                auto parts = string_split<std::string>(spec, ':');
+                float scale = 1.0f;
+                if (parts.size() > 1) {
+                    scale = std::stof(parts[1]);
+                }
+                lora_adapters.push_back({ parts[0], scale, "", "", nullptr });
+            }
+        }
+
         for (const auto & n_prompt : params.n_prompt) {
             if (n_prompt == 0) {
                 continue;
@@ -1282,6 +1318,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .early_exit   = */ ee,
                 /* .early_exit_gap = */ eeg,
                 /* .early_exit_burnout = */ eeb,
+                /* .lora_adapters = */ lora_adapters,
             };
             instances.push_back(instance);
         }
@@ -1320,6 +1357,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .early_exit   = */ ee,
                 /* .early_exit_gap = */ eeg,
                 /* .early_exit_burnout = */ eeb,
+                /* .lora_adapters = */ lora_adapters,
             };
             instances.push_back(instance);
         }
@@ -1358,6 +1396,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .early_exit   = */ ee,
                 /* .early_exit_gap = */ eeg,
                 /* .early_exit_burnout = */ eeb,
+                /* .lora_adapters = */ lora_adapters,
             };
             instances.push_back(instance);
         }
@@ -2197,12 +2236,10 @@ int main(int argc, char ** argv) {
 
     std::vector<cmd_params_instance> params_instances = get_cmd_params_instances(params);
 
-    llama_model *               lmodel    = nullptr;
-    const cmd_params_instance * prev_inst = nullptr;
-
-    // store the llama_context state at the previous depth that we performed a test
-    // ref: https://github.com/ggml-org/llama.cpp/pull/16944#issuecomment-3478151721
+    llama_model * lmodel = NULL;
+    const cmd_params_instance * prev_inst = NULL;
     ctx_state cstate;
+    std::vector<struct llama_adapter_lora *> loaded_adapters;
 
     int  params_idx   = 0;
     auto params_count = params_instances.size();
@@ -2216,12 +2253,25 @@ int main(int argc, char ** argv) {
             if (lmodel) {
                 llama_model_free(lmodel);
             }
+            loaded_adapters.clear();
 
             lmodel = llama_model_load_from_file(inst.model.c_str(), inst.to_llama_mparams());
             if (lmodel == NULL) {
                 fprintf(stderr, "%s: error: failed to load model '%s'\n", __func__, inst.model.c_str());
                 return 1;
             }
+
+            // Load LoRA adapters
+            for (const auto & la : inst.lora_adapters) {
+                struct llama_adapter_lora * adapter = llama_adapter_lora_init(lmodel, la.path.c_str());
+                if (adapter == nullptr) {
+                    fprintf(stderr, "%s: error: failed to load LoRA adapter '%s'\n", __func__, la.path.c_str());
+                    llama_model_free(lmodel);
+                    return 1;
+                }
+                loaded_adapters.push_back(adapter);
+            }
+
             prev_inst = &inst;
         }
 
@@ -2230,6 +2280,11 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "%s: error: failed to create context with model '%s'\n", __func__, inst.model.c_str());
             llama_model_free(lmodel);
             return 1;
+        }
+
+        // Apply LoRA adapters to context
+        for (size_t i = 0; i < loaded_adapters.size(); i++) {
+            llama_set_adapter_lora(ctx, loaded_adapters[i], inst.lora_adapters[i].scale);
         }
 
         test t(inst, lmodel, ctx);
