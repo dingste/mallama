@@ -1,0 +1,50 @@
+build/bin/llama-bench -m /home/dieter/Entwicklung/kompeo/export/models/base/mistral-7B_q8.gguf -n 16 -p 64 -t 8
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| llama 8B Q8_0                  |   7.95 GiB |     8.03 B | CPU        |       8 |            pp64 |         23.73 ± 1.35 |
+| llama 8B Q8_0                  |   7.95 GiB |     8.03 B | CPU        |       8 |            tg16 |          5.16 ± 0.01 |
+
+build: 480160d47 (7679)
+
+---
+
+Size: 3,1M hio_p_prof.gguf
+
+llama-server -m /home/dieter/Entwicklung/kompeo/export/models/base/mistral-7B_q8.gguf -t 8 --lora /home/dieter/Entwicklung/kompeo/export/models/sts/hio_p_prof.gguf \
+  --early-exit --early-exit-gap 16.0 --early-exit-burnout 30.0 \
+  --embeddings --pooling cls \
+  --port 8080 --mlock
+  
+(-n 16 ): 
+prompt eval time =    3108.19 ms /    50 tokens (   62.16 ms per token,    16.09 tokens per second)
+       eval time =    3376.68 ms /    16 tokens (  211.04 ms per token,     4.74 tokens per second)
+      total time =    6484.87 ms /    66 tokens
+slot      release: id  3 | task 0 | stop processing: n_tokens = 65, truncated = 0
+
+(ohne token limits):
+prompt eval time =    1263.02 ms /    17 tokens (   74.30 ms per token,    13.46 tokens per second)
+       eval time =    3518.79 ms /    16 tokens (  219.92 ms per token,     4.55 tokens per second)
+      total time =    4781.81 ms /    33 tokens
+slot      release: id  3 | task 17 | stop processing: n_tokens = 97, truncated = 0
+
+eine Konfiguration gefunden, die den Professor lebendig macht, ohne dass er in unendliches Geschwafel verfällt. Die 4.22 t/s sind zwar langsamer als der rohe Benchmark, aber dafür bekommst du eine spezialisierte Persönlichkeit, die "weiß", wann sie fertig ist.
+
+Metrik,Ergebnis (Gap 12.0),Einordnung
+Prompt Speed,19.84 t/s,"Starker Wert. Er liegt zwar unter den 22-23 t/s, aber immer noch weit über deinem ersten Versuch (~13 t/s)."
+Generation Speed,4.57 t/s,Fast identisch zum 14.0-Test (4.52 t/s).
+Effizienz,14 Token,Hier liegt der eigentliche Gewinn: Du sparst die Zeit für die letzten 2 Token komplett ein.
+
+Metrik,Wert,Bewertung
+Prompt Eval,19.81 t/s,Top. Auch bei fast 300 Token Kontext bleibt der Prefill schnell.
+Generation,4.22 t/s,"Stabil im ""Professor-Modus"". Der leichte Abfall gegenüber 4.29 t/s liegt am gewachsenen Kontext (KV-Cache Management)."
+
+Metrik,Wert,Trend
+Prompt Eval,18.84 t/s,"Sinkt leicht (da der Kontext auf 357 Token angewachsen ist), bleibt aber sehr effizient."
+Generation,4.39 t/s,Tatsächlich ein kleiner Anstieg gegenüber dem letzten Test (4.22 t/s)!
+
+Was wir über den "Professor" gelernt haben
+Dein path-trained LoRA scheint eine sehr starke Tendenz zu haben, nach dem eigentlichen Kern der Antwort noch "Regieanweisungen" oder Füllsätze anzuhängen.
+    Ohne Early-Exit würde er vermutlich ewig weiterreden.
+    Mit einem Limit von ~31.0 schneidest du genau das "Gemurmel" am Ende ab, behältst aber die charakteristische Einleitung und den Hauptsatz.
+    Beobachtung: Dein eval time pro Token ist mit 228.05 ms sehr stabil. Das ist dein Hardware-Limit für Q8 auf 8 Threads mit LoRA-Overhead. Schneller wird es pro Token nur, wenn wir den early-exit-gap (nicht das Budget!) so weit senken, dass er massiv Layer überspringt – aber dann verlieren wir die Professor-Persona.
+    

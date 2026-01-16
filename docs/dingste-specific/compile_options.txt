@@ -1,0 +1,24 @@
+cmake -S . -B build -DGGML_BLAS=ON -DGGML_CUDA=OFF -DGGML_HIP=ON -DGGML_HIP_UMA=ON -DAMDGPU_TARGETS=gfx900 -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=hipcc -DGGML_VULKAN=OFF
+cmake --build build --config Release -- -j 16
+
+AOCL_mt -DGGML_BLAS_VENDOR=openblas64 
+
+LLAMAFILE=OFF
+AARCH64_REPACK=OFF
+GGML_CLBLAST=ON
+-DGGML_BLAS_VENDOR=ACML, ACML_MP, ACML_GPU, OpenBLAS
+HSA_OVERRIDE_GFX_VERSION=9.0.0
+-DHIP_PLATFORM=amd 
+
+### faiss
+HSA_OVERRIDE_GFX_VERSION=9.0.12 HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" cmake -S . -B build -DGGML_CUDA_FA_ALL_QUANTS=1 -DHIP_PLATFORM=amd -DGGML_BLAS=ON -DGGML_HIP=ON -DGGML_HIP_UMA=OFF -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DGGML_OPENCL=OFF -DAMDGPU_TARGETS=gfx90c
+cmake --build build --config Release -- -j16
+
+
+## convert
+source pvenvironment
+python llama.cpp/convert.py vicuna-hf --outfile vicuna-13b-v1.5.gguf --outtype bf16
+python convert_hf_to_gguf_update.py models/Taiwan-LLM-8B/
+
+## start
+llama.cpp/build/bin/llama-server -m /home/dieter/Entwicklung/localllama/models/Mistral-7B/mistral-7B_q8.gguf
