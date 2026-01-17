@@ -136,6 +136,21 @@ static std::string get_gpu_info() {
     return join(gpu_list, ", ");
 }
 
+static float get_entropy_stability(const float * logits, int n_vocab) {
+    float max1 = -INFINITY;
+    float max2 = -INFINITY;
+    for (int i = 0; i < n_vocab; ++i) {
+        const float v = logits[i];
+        if (v > max1) {
+            max2 = max1;
+            max1 = v;
+        } else if (v > max2) {
+            max2 = v;
+        }
+    }
+    return max1 - max2;
+}
+
 static std::vector<ggml_backend_dev_t> parse_devices_arg(const std::string & value) {
     std::vector<ggml_backend_dev_t> devices;
     std::string                     trimmed = string_strip(value);
@@ -338,6 +353,10 @@ struct cmd_params {
     std::vector<bool>                embeddings;
     std::vector<bool>                no_op_offload;
     std::vector<bool>                no_host;
+    std::vector<bool>                early_exit;
+    std::vector<float>               early_exit_gap;
+    std::vector<float>               early_exit_burnout;
+    std::vector<std::string>         lora;
     ggml_numa_strategy               numa;
     int                              reps;
     ggml_sched_priority              prio;
@@ -377,6 +396,10 @@ static const cmd_params cmd_params_defaults = {
     /* embeddings           */ { false },
     /* no_op_offload        */ { false },
     /* no_host              */ { false },
+    /* early_exit           */ { false },
+    /* early_exit_gap       */ { 6.0f },
+    /* early_exit_burnout   */ { 1000.0f },
+    /* lora                 */ { "" },
     /* numa                 */ GGML_NUMA_STRATEGY_DISABLED,
     /* reps                 */ 5,
     /* prio                 */ GGML_SCHED_PRIO_NORMAL,
@@ -461,6 +484,12 @@ static void print_usage(int /* argc */, char ** argv) {
     printf("  -nopo, --no-op-offload <0|1>              (default: 0)\n");
     printf("  --no-host <0|1>                           (default: %s)\n",
            join(cmd_params_defaults.no_host, ",").c_str());
+    printf("  --early-exit <0|1>                        (default: %s)\n",
+           join(cmd_params_defaults.early_exit, ",").c_str());
+    printf("  --early-exit-gap <f>                      (default: %s)\n",
+           join(cmd_params_defaults.early_exit_gap, ",").c_str());
+    printf("  --early-exit-burnout <f>                  (default: %s)\n",
+           join(cmd_params_defaults.early_exit_burnout, ",").c_str());
     printf("\n");
     printf(
         "Multiple values can be given for each parameter by separating them with ','\n"
@@ -804,6 +833,34 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                 }
                 auto p = string_split<bool>(argv[i], split_delim);
                 params.no_host.insert(params.no_host.end(), p.begin(), p.end());
+            } else if (arg == "--early-exit") {
+                if (++i >= argc) {
+                    invalid_param = true;
+                    break;
+                }
+                auto p = string_split<bool>(argv[i], split_delim);
+                params.early_exit.insert(params.early_exit.end(), p.begin(), p.end());
+            } else if (arg == "--early-exit-gap") {
+                if (++i >= argc) {
+                    invalid_param = true;
+                    break;
+                }
+                auto p = string_split<float>(argv[i], split_delim);
+                params.early_exit_gap.insert(params.early_exit_gap.end(), p.begin(), p.end());
+            } else if (arg == "--early-exit-burnout") {
+                if (++i >= argc) {
+                    invalid_param = true;
+                    break;
+                }
+                auto p = string_split<float>(argv[i], split_delim);
+                params.early_exit_burnout.insert(params.early_exit_burnout.end(), p.begin(), p.end());
+            } else if (arg == "--lora") {
+                if (++i >= argc) {
+                    invalid_param = true;
+                    break;
+                }
+                auto p = string_split<std::string>(argv[i], split_delim);
+                params.lora.insert(params.lora.end(), p.begin(), p.end());
             } else if (arg == "-ts" || arg == "--tensor-split") {
                 if (++i >= argc) {
                     invalid_param = true;
@@ -1031,6 +1088,18 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
     if (params.no_host.empty()) {
         params.no_host = cmd_params_defaults.no_host;
     }
+    if (params.early_exit.empty()) {
+        params.early_exit = cmd_params_defaults.early_exit;
+    }
+    if (params.early_exit_gap.empty()) {
+        params.early_exit_gap = cmd_params_defaults.early_exit_gap;
+    }
+    if (params.early_exit_burnout.empty()) {
+        params.early_exit_burnout = cmd_params_defaults.early_exit_burnout;
+    }
+    if (params.lora.empty()) {
+        params.lora = cmd_params_defaults.lora;
+    }
     if (params.n_threads.empty()) {
         params.n_threads = cmd_params_defaults.n_threads;
     }
@@ -1074,6 +1143,10 @@ struct cmd_params_instance {
     bool               embeddings;
     bool               no_op_offload;
     bool               no_host;
+    bool               early_exit;
+    float              early_exit_gap;
+    float              early_exit_burnout;
+    std::vector<common_adapter_lora_info> lora_adapters;
 
     llama_model_params to_llama_mparams() const {
         llama_model_params mparams = llama_model_default_params();
@@ -1129,6 +1202,15 @@ struct cmd_params_instance {
     }
 
     bool equal_mparams(const cmd_params_instance & other) const {
+        if (lora_adapters.size() != other.lora_adapters.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < lora_adapters.size(); i++) {
+            if (lora_adapters[i].path != other.lora_adapters[i].path ||
+                lora_adapters[i].scale != other.lora_adapters[i].scale) {
+                return false;
+            }
+        }
         return model == other.model && n_gpu_layers == other.n_gpu_layers && n_cpu_moe == other.n_cpu_moe &&
                split_mode == other.split_mode &&
                main_gpu == other.main_gpu && tensor_split == other.tensor_split &&
@@ -1184,7 +1266,24 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
     for (const auto & cm : params.cpu_mask)
     for (const auto & cs : params.cpu_strict)
     for (const auto & nd : params.n_depth)
-    for (const auto & pl : params.poll) {
+    for (const auto & pl : params.poll)
+    for (const auto & ee : params.early_exit)
+    for (const auto & eeg : params.early_exit_gap)
+    for (const auto & eeb : params.early_exit_burnout)
+    for (const auto & lo : params.lora) {
+        std::vector<common_adapter_lora_info> lora_adapters;
+        if (!lo.empty()) {
+            auto lora_specs = string_split<std::string>(lo, '+');
+            for (const auto & spec : lora_specs) {
+                auto parts = string_split<std::string>(spec, ':');
+                float scale = 1.0f;
+                if (parts.size() > 1) {
+                    scale = std::stof(parts[1]);
+                }
+                lora_adapters.push_back({ parts[0], scale, "", "", nullptr });
+            }
+        }
+
         for (const auto & n_prompt : params.n_prompt) {
             if (n_prompt == 0) {
                 continue;
@@ -1216,6 +1315,10 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .embeddings   = */ embd,
                 /* .no_op_offload= */ nopo,
                 /* .no_host      = */ noh,
+                /* .early_exit   = */ ee,
+                /* .early_exit_gap = */ eeg,
+                /* .early_exit_burnout = */ eeb,
+                /* .lora_adapters = */ lora_adapters,
             };
             instances.push_back(instance);
         }
@@ -1251,6 +1354,10 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .embeddings   = */ embd,
                 /* .no_op_offload= */ nopo,
                 /* .no_host      = */ noh,
+                /* .early_exit   = */ ee,
+                /* .early_exit_gap = */ eeg,
+                /* .early_exit_burnout = */ eeb,
+                /* .lora_adapters = */ lora_adapters,
             };
             instances.push_back(instance);
         }
@@ -1286,6 +1393,10 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .embeddings   = */ embd,
                 /* .no_op_offload= */ nopo,
                 /* .no_host      = */ noh,
+                /* .early_exit   = */ ee,
+                /* .early_exit_gap = */ eeg,
+                /* .early_exit_burnout = */ eeb,
+                /* .lora_adapters = */ lora_adapters,
             };
             instances.push_back(instance);
         }
@@ -1326,6 +1437,9 @@ struct test {
     bool                     embeddings;
     bool                     no_op_offload;
     bool                     no_host;
+    bool                     early_exit;
+    float                    early_exit_gap;
+    float                    early_exit_burnout;
     int                      n_prompt;
     int                      n_gen;
     int                      n_depth;
@@ -1364,6 +1478,9 @@ struct test {
         embeddings     = inst.embeddings;
         no_op_offload  = inst.no_op_offload;
         no_host        = inst.no_host;
+        early_exit     = inst.early_exit;
+        early_exit_gap = inst.early_exit_gap;
+        early_exit_burnout = inst.early_exit_burnout;
         n_prompt       = inst.n_prompt;
         n_gen          = inst.n_gen;
         n_depth        = inst.n_depth;
@@ -1988,8 +2105,8 @@ static bool test_prompt(llama_context * ctx, int n_prompt, int n_batch, int n_th
     return true;
 }
 
-static bool test_gen(llama_context * ctx, int n_gen, int n_threads) {
-    llama_set_n_threads(ctx, n_threads, n_threads);
+static bool test_gen(llama_context * ctx, int n_gen, const test & t) {
+    llama_set_n_threads(ctx, t.n_threads, t.n_threads);
 
     const llama_model * model   = llama_get_model(ctx);
     const llama_vocab * vocab   = llama_model_get_vocab(model);
@@ -1997,12 +2114,40 @@ static bool test_gen(llama_context * ctx, int n_gen, int n_threads) {
 
     llama_token token = llama_vocab_get_add_bos(vocab) ? llama_vocab_bos(vocab) : std::rand() % n_vocab;
 
+    // Information Dynamics
+    float s_prev_stability = 0.0f;
+    float e_accumulated_dissipation = 0.0f;
+    bool  dynamics_initialized = false;
+
     for (int i = 0; i < n_gen; i++) {
         int res = llama_decode(ctx, llama_batch_get_one(&token, 1));
         if (res != 0) {
             fprintf(stderr, "%s: failed to decode generation batch, res = %d\n", __func__, res);
             return false;
         }
+
+        if (t.early_exit) {
+            const float * logits = llama_get_logits(ctx);
+            const float S = get_entropy_stability(logits, n_vocab);
+
+            if (!dynamics_initialized) {
+                s_prev_stability = S;
+                dynamics_initialized = true;
+            }
+
+            float S_prime = S - s_prev_stability;
+            s_prev_stability = S;
+            e_accumulated_dissipation += std::abs(S_prime);
+
+            if (e_accumulated_dissipation > t.early_exit_burnout) {
+                break;
+            }
+
+            if (S > t.early_exit_gap) {
+                break;
+            }
+        }
+
         llama_synchronize(ctx);
         token = std::rand() % n_vocab;
     }
@@ -2091,12 +2236,10 @@ int main(int argc, char ** argv) {
 
     std::vector<cmd_params_instance> params_instances = get_cmd_params_instances(params);
 
-    llama_model *               lmodel    = nullptr;
-    const cmd_params_instance * prev_inst = nullptr;
-
-    // store the llama_context state at the previous depth that we performed a test
-    // ref: https://github.com/ggml-org/llama.cpp/pull/16944#issuecomment-3478151721
+    llama_model * lmodel = NULL;
+    const cmd_params_instance * prev_inst = NULL;
     ctx_state cstate;
+    std::vector<struct llama_adapter_lora *> loaded_adapters;
 
     int  params_idx   = 0;
     auto params_count = params_instances.size();
@@ -2110,12 +2253,25 @@ int main(int argc, char ** argv) {
             if (lmodel) {
                 llama_model_free(lmodel);
             }
+            loaded_adapters.clear();
 
             lmodel = llama_model_load_from_file(inst.model.c_str(), inst.to_llama_mparams());
             if (lmodel == NULL) {
                 fprintf(stderr, "%s: error: failed to load model '%s'\n", __func__, inst.model.c_str());
                 return 1;
             }
+
+            // Load LoRA adapters
+            for (const auto & la : inst.lora_adapters) {
+                struct llama_adapter_lora * adapter = llama_adapter_lora_init(lmodel, la.path.c_str());
+                if (adapter == nullptr) {
+                    fprintf(stderr, "%s: error: failed to load LoRA adapter '%s'\n", __func__, la.path.c_str());
+                    llama_model_free(lmodel);
+                    return 1;
+                }
+                loaded_adapters.push_back(adapter);
+            }
+
             prev_inst = &inst;
         }
 
@@ -2124,6 +2280,11 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "%s: error: failed to create context with model '%s'\n", __func__, inst.model.c_str());
             llama_model_free(lmodel);
             return 1;
+        }
+
+        // Apply LoRA adapters to context
+        for (size_t i = 0; i < loaded_adapters.size(); i++) {
+            llama_set_adapter_lora(ctx, loaded_adapters[i], inst.lora_adapters[i].scale);
         }
 
         test t(inst, lmodel, ctx);
@@ -2175,7 +2336,7 @@ int main(int argc, char ** argv) {
                 if (params.progress) {
                     fprintf(stderr, "llama-bench: benchmark %d/%zu: warmup generation run\n", params_idx, params_count);
                 }
-                bool res = test_gen(ctx, 1, t.n_threads);
+                bool res = test_gen(ctx, 1, t);
                 if (!res) {
                     fprintf(stderr, "%s: error: failed to run gen warmup\n", __func__);
                     llama_free(ctx);
@@ -2245,7 +2406,7 @@ int main(int argc, char ** argv) {
                     fprintf(stderr, "llama-bench: benchmark %d/%zu: generation run %d/%d\n", params_idx, params_count,
                             i + 1, params.reps);
                 }
-                bool res = test_gen(ctx, t.n_gen, t.n_threads);
+                bool res = test_gen(ctx, t.n_gen, t);
                 if (!res) {
                     fprintf(stderr, "%s: error: failed to run gen\n", __func__);
                     llama_free(ctx);
